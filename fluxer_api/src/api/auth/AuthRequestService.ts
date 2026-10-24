@@ -51,6 +51,8 @@ import type {
 	RegisterRequest,
 	ResetPasswordRequest,
 	SsoCompleteRequest,
+	SsoLinkCompleteRequest,
+	SsoLinkStartRequest,
 	SsoStartRequest,
 	UsernameAvailabilityResponse,
 	UsernameSuggestionsResponse,
@@ -164,6 +166,14 @@ export class AuthRequestService {
 		return this.toSsoCompleteResponse(
 			this.ssoService.completeLogin({code: data.code, state: data.state, request, requestCache}),
 		);
+	}
+
+	startSsoLink(user: User, data: SsoLinkStartRequest) {
+		return this.ssoService.startLink({user, redirectTo: data.redirect_to ?? undefined});
+	}
+
+	completeSsoLink(user: User, data: SsoLinkCompleteRequest) {
+		return this.ssoService.completeLink({user, code: data.code, state: data.state});
 	}
 
 	async register({data, request, requestCache}: AuthRegisterRequest): Promise<AuthRegisterResponse> {

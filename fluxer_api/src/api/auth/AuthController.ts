@@ -53,6 +53,9 @@ import {
 	ResetPasswordTokenParam,
 	SsoCompleteRequest,
 	SsoCompleteResponse,
+	SsoLinkCompleteRequest,
+	SsoLinkCompleteResponse,
+	SsoLinkStartRequest,
 	SsoStartRequest,
 	SsoStartResponse,
 	SsoStatusResponse,
@@ -125,6 +128,48 @@ export function AuthController(app: HonoApp) {
 				.get('authRequestService')
 				.completeSso(ctx.req.valid('json'), ctx.req.raw, ctx.get('requestCache'));
 			return ctx.json(result);
+		},
+	);
+	app.post(
+		'/auth/sso/link/start',
+		RateLimitMiddleware(RateLimitConfigs.AUTH_SSO_START),
+		LoginRequired,
+		DefaultUserOnly,
+		SudoModeMiddleware,
+		Validator('json', SsoLinkStartRequest),
+		OpenAPI({
+			operationId: 'start_sso_wallet_link',
+			summary: 'Start linking a DAOI wallet to the current account',
+			responseSchema: SsoStartResponse,
+			statusCode: 200,
+			security: ['bearerToken', 'sessionToken'],
+			tags: ['Auth'],
+			description: 'Requires authentication and sudo verification. Keeps the existing account and its data.',
+		}),
+		async (ctx) => {
+			const user = ctx.get('user');
+			const body = ctx.req.valid('json');
+			await requireSudoMode(ctx, user, body);
+			return ctx.json(await ctx.get('authRequestService').startSsoLink(user, body));
+		},
+	);
+	app.post(
+		'/auth/sso/link/complete',
+		RateLimitMiddleware(RateLimitConfigs.AUTH_SSO_COMPLETE),
+		LoginRequired,
+		DefaultUserOnly,
+		Validator('json', SsoLinkCompleteRequest),
+		OpenAPI({
+			operationId: 'complete_sso_wallet_link',
+			summary: 'Complete linking a DAOI wallet to the current account',
+			responseSchema: SsoLinkCompleteResponse,
+			statusCode: 200,
+			security: ['bearerToken', 'sessionToken'],
+			tags: ['Auth'],
+			description: 'Verifies the wallet and the initiating account without creating or switching sessions.',
+		}),
+		async (ctx) => {
+			return ctx.json(await ctx.get('authRequestService').completeSsoLink(ctx.get('user'), ctx.req.valid('json')));
 		},
 	);
 	app.post(

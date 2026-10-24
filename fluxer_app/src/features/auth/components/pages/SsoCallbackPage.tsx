@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import RuntimeConfig from '@app/features/app/state/RuntimeConfig';
+import {UserSettingsModal} from '@app/features/app/components/dialogs/LoadableSettingsModals';
 import * as AuthenticationCommands from '@app/features/auth/commands/AuthenticationCommands';
 import styles from '@app/features/auth/components/pages/LoginPage.module.css';
 import {useAuthSingleUseRequest} from '@app/features/auth/flow/AuthSingleUseRequest';
 import {useAuthPresentation} from '@app/features/auth/flow/useAuthPresentation';
-import {completeSsoLogin, startSsoLogin} from '@app/features/auth/state/AuthFlow';
+import {useSudo} from '@app/features/auth/hooks/useSudo';
+import {
+	completeSsoLink,
+	completeSsoLogin,
+	isSsoLinkContextCurrent,
+	SsoLinkContextMismatchError,
+	startSsoLink,
+	startSsoLogin,
+} from '@app/features/auth/state/AuthFlow';
 import {AuthCardVariant} from '@app/features/auth/state/AuthLayoutContext';
 import {type AuthRuntimeTarget, useAuthRuntimeTarget} from '@app/features/auth/state/AuthRuntimeTarget';
 import {
@@ -21,6 +30,8 @@ import {
 } from '@app/features/i18n/utils/CommonMessageDescriptors';
 import * as RouterUtils from '@app/features/navigation/utils/RouterUtils';
 import {Spinner} from '@app/features/ui/components/Spinner';
+import * as ModalCommands from '@app/features/ui/commands/ModalCommands';
+import * as ToastCommands from '@app/features/ui/commands/ToastCommands';
 import {navigateToExternalURL} from '@app/features/ui/utils/NativeUtils';
 import {useFluxerDocumentTitle} from '@app/features/window/hooks/useFluxerDocumentTitle';
 import * as FormUtils from '@app/lib/forms';
@@ -49,6 +60,34 @@ const OPEN_PRODUCT_DESCRIPTOR = msg({
 	comment: 'Button that hands SSO sign-in back to the mobile app. productName is the app name.',
 });
 const SSO_TIMEOUT_MS = 30_000;
+
+function walletLinkCopy(locale: string) {
+	return locale.startsWith('zh') ? {
+		processing: '正在绑定 DAOI 钱包…',
+		failed: '暂时无法确认钱包绑定结果，请返回账号设置重试。',
+		conflict: '这个钱包已绑定其他聊天账号，请使用该账号登录，或选择另一个钱包。',
+		changed: '当前账号或聊天服务器已变化，请返回账号设置重新绑定。',
+		success: '钱包绑定成功，已有群、私聊和历史继续保留。',
+		title: '钱包绑定未完成',
+		back: '返回账号设置',
+	} : {
+		processing: 'Linking your DAOI wallet…',
+		failed: 'The wallet link could not be confirmed. Return to account settings and try again.',
+		conflict: 'This wallet belongs to another chat account. Sign in to that account or choose another wallet.',
+		changed: 'The active account or chat server changed. Start again from account settings.',
+		success: 'Wallet linked. Your existing communities, chats and history are preserved.',
+		title: 'Wallet link not completed',
+		back: 'Back to account settings',
+	};
+}
+
+function returnFromWalletLink(context: SsoPendingContext | null): void {
+	const destination = isSsoLinkContextCurrent(context) ? safeRedirectTarget(context?.redirectTo) : null;
+	RouterUtils.replaceWith(destination ?? '/channels/@me');
+	if (!destination?.startsWith('/project-community')) {
+		ModalCommands.push(ModalCommands.modal(() => <UserSettingsModal initialTab="account_security" />, 'user-settings'));
+	}
+}
 
 interface SsoCallbackParameters {
 	code: string;
@@ -112,6 +151,17 @@ class SsoCallbackAttempt {
 			this.finishWithError(this.dependencies.i18n._(FAILED_TO_COMPLETE_SSO_SIGN_IN_DESCRIPTOR));
 			return;
 		}
+		const context = this.dependencies.callbackContext;
+		if (context?.mode === 'link') {
+			const result = await completeSsoLink({code: callbackParameters.code, state: callbackParameters.state, context});
+			consumeSsoPendingContext(callbackParameters.state);
+			if (this.settled || !this.dependencies.isCurrent()) return;
+			this.stopTimeout();
+			this.settled = true;
+			ToastCommands.success(walletLinkCopy(this.dependencies.i18n.locale).success);
+			returnFromWalletLink({...context, redirectTo: safeRedirectTarget(result.redirect_to) ?? context.redirectTo});
+			return;
+		}
 		const result = await completeSsoLogin({
 			code: callbackParameters.code,
 			state: callbackParameters.state,
@@ -136,10 +186,23 @@ class SsoCallbackAttempt {
 
 	private handleTimeout(): void {
 		this.timeoutId = null;
-		this.finishWithError(this.dependencies.i18n._(SSO_SIGN_IN_TIMED_OUT_PLEASE_TRY_AGAIN_DESCRIPTOR));
+		this.finishWithError(this.dependencies.callbackContext?.mode === 'link'
+			? walletLinkCopy(this.dependencies.i18n.locale).failed
+			: this.dependencies.i18n._(SSO_SIGN_IN_TIMED_OUT_PLEASE_TRY_AGAIN_DESCRIPTOR));
 	}
 
 	private handleFailure(error: unknown): void {
+		if (this.dependencies.callbackContext?.mode === 'link') {
+			const copy = walletLinkCopy(this.dependencies.i18n.locale);
+			const body = error && typeof error === 'object' && 'body' in error ? error.body : null;
+			const mismatch = body && typeof body === 'object' && (
+				('code' in body && body.code === 'SSO_IDENTITY_MISMATCH') ||
+				('errors' in body && Array.isArray(body.errors) && body.errors.some((entry: unknown) =>
+					entry && typeof entry === 'object' && 'code' in entry && entry.code === 'SSO_IDENTITY_MISMATCH'))
+			);
+			this.finishWithError(error instanceof SsoLinkContextMismatchError ? copy.changed : mismatch ? copy.conflict : copy.failed);
+			return;
+		}
 		if (!this.settled && AuthenticationCommands.showAccountRestriction(error)) {
 			this.settled = true;
 			this.stopTimeout();
@@ -188,6 +251,7 @@ class SsoCallbackAttempt {
 const SsoCallbackPage = observer(function SsoCallbackPage() {
 	const {i18n} = useLingui();
 	const runtimeTarget = useAuthRuntimeTarget();
+	const sudo = useSudo();
 	useFluxerDocumentTitle(i18n._(SIGN_IN_DESCRIPTOR));
 	useAuthPresentation({variant: AuthCardVariant.COMPACT});
 	const params = new URLSearchParams(window.location.search);
@@ -201,9 +265,15 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 	const [error, setError] = useState<string | null>(null);
 	const [isProcessing, setIsProcessing] = useState(true);
 	const [pendingContext, setPendingContext] = useState<SsoPendingContext | null>(null);
+	const isLink = pendingContext?.mode === 'link';
+	const linkCopy = walletLinkCopy(i18n.locale);
 	const handleBackToLogin = useCallback(() => {
 		if (state != null && state.length > 0) {
 			consumeSsoPendingContext(state);
+		}
+		if (pendingContext?.mode === 'link') {
+			returnFromWalletLink(pendingContext);
+			return;
 		}
 		const runtimeSnapshot = pendingContext?.runtimeSnapshot ?? null;
 		if (runtimeSnapshot == null) {
@@ -217,6 +287,24 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 		setError(null);
 		setIsProcessing(true);
 		try {
+			if (pendingContext?.mode === 'link') {
+				if (!isSsoLinkContextCurrent(pendingContext) || !pendingContext.runtimeSnapshot || !pendingContext.linkTargetUserId) {
+					setError(linkCopy.changed);
+					setIsProcessing(false);
+					return;
+				}
+				const verification = await sudo.require();
+				const {authorizationUrl} = await startSsoLink({
+					redirectTo: pendingContext.redirectTo,
+					runtimeSnapshot: pendingContext.runtimeSnapshot,
+					linkTargetUserId: pendingContext.linkTargetUserId,
+					verification,
+				});
+				sudo.finalize();
+				if (state) consumeSsoPendingContext(state);
+				await navigateToExternalURL(authorizationUrl);
+				return;
+			}
 			const runtimeSnapshot = pendingContext?.runtimeSnapshot ?? runtimeTarget.snapshot;
 			if (runtimeSnapshot == null) {
 				RouterUtils.replaceWith('/login');
@@ -228,9 +316,12 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 			});
 			await navigateToExternalURL(authorizationUrl);
 		} catch {
-			RouterUtils.replaceWith('/login');
+			if (pendingContext?.mode === 'link') {
+				setError(linkCopy.failed);
+				setIsProcessing(false);
+			} else RouterUtils.replaceWith('/login');
 		}
-	}, [pendingContext, runtimeTarget]);
+	}, [pendingContext, runtimeTarget, sudo, state, linkCopy.changed, linkCopy.failed]);
 	useAuthSingleUseRequest(`${code ?? ''}:${state ?? ''}`, (request) => {
 		if (mobileCallbackUrl != null) {
 			window.location.replace(mobileCallbackUrl);
@@ -285,7 +376,7 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 				data-flx="auth.sso-callback-page.login-container"
 			>
 				<h1 className={styles.title} data-flx="auth.sso-callback-page.title">
-					<Trans>SSO sign-in failed</Trans>
+					{isLink ? linkCopy.title : <Trans>SSO sign-in failed</Trans>}
 				</h1>
 				<flx-auth-sso-callback-page-notice
 					aria-live="assertive"
@@ -312,7 +403,7 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 						className={styles.ssoBackButton}
 						data-flx="auth.sso-callback-page.sso-back-button.back-to-login"
 					>
-						{i18n._(BACK_TO_SIGN_IN_DESCRIPTOR)}
+						{isLink ? linkCopy.back : i18n._(BACK_TO_SIGN_IN_DESCRIPTOR)}
 					</button>
 				</flx-auth-sso-callback-page-actions>
 			</flx-auth-sso-callback-page>
@@ -324,7 +415,7 @@ const SsoCallbackPage = observer(function SsoCallbackPage() {
 			data-flx="auth.sso-callback-page.login-container--2"
 		>
 			<h1 className={styles.title} data-flx="auth.sso-callback-page.title--2">
-				<Trans>Completing sign-in…</Trans>
+				{isLink ? linkCopy.processing : <Trans>Completing sign-in…</Trans>}
 			</h1>
 			{isProcessing && (
 				<p className={styles.ssoProcessingHint} role="status" data-flx="auth.sso-callback-page.sso-processing-hint">

@@ -22,6 +22,10 @@ interface Claims {
 
 interface SsoTestAccess {
 	startLogin(): Promise<{authorization_url: string}>;
+	startLink(options: {user: {id: bigint}; redirectTo?: string}): Promise<{authorization_url: string}>;
+	completeLogin(options: {code: string; state: string; request: Request; requestCache: unknown}): Promise<unknown>;
+	completeLink(options: {user: unknown; code: string; state: string}): Promise<unknown>;
+	exchangeCode(options: unknown): Promise<{id_token: string}>;
 	requireReadyConfig(): Promise<unknown>;
 	resolveClaims(tokens: {id_token?: string; access_token?: string}, config: unknown, nonce: string): Promise<Claims>;
 	resolveUserFromClaims(claims: Claims, config: unknown, cache: unknown): Promise<unknown>;
@@ -37,6 +41,8 @@ describe('DAOI wallet SSO', () => {
 	let service: SsoTestAccess;
 	let users: {findUnique: ReturnType<typeof vi.fn>; findByEmail: ReturnType<typeof vi.fn>};
 	let findUserId: ReturnType<typeof vi.fn>;
+	let cache: {set: ReturnType<typeof vi.fn>; getAndDelete: ReturnType<typeof vi.fn>};
+	let setWalletAddress: ReturnType<typeof vi.fn>;
 
 	const config = (issuer = ISSUER) => ({
 		issuer,
@@ -77,10 +83,12 @@ describe('DAOI wallet SSO', () => {
 		mode = AccountIdentityModes.USERNAME;
 		users = {findUnique: vi.fn(), findByEmail: vi.fn()};
 		findUserId = vi.fn().mockResolvedValue(null);
+		cache = {set: vi.fn(), getAndDelete: vi.fn()};
+		setWalletAddress = vi.fn().mockResolvedValue(true);
 		service = Object.assign(Object.create(SsoService.prototype), {
-			apiContext: {request: {}, services: {users, cache: {set: vi.fn()}}},
+			apiContext: {request: {}, services: {users, cache}},
 			instanceConfigRepository: {getAccountIdentity: async () => ({mode})},
-			ssoIdentityRepository: {findUserId},
+			ssoIdentityRepository: {findUserId, setWalletAddress},
 		}) as SsoTestAccess;
 		vi.spyOn(service, 'getOrCreateJwks').mockResolvedValue(jwks);
 	});
@@ -197,5 +205,67 @@ describe('DAOI wallet SSO', () => {
 		await expect(service.resolveUserFromClaims(claims, config(), {})).rejects.toThrow();
 		expect(findUserId).toHaveBeenCalledWith(ISSUER, SUBJECT);
 		expect(users.findByEmail).not.toHaveBeenCalled();
+	});
+
+	it('creates link state only for the authenticated server-side target', async () => {
+		vi.spyOn(service, 'requireReadyConfig').mockResolvedValue(config());
+		await service.startLink({user: {id: 123n}, redirectTo: '/project-community?id=7'});
+		expect(cache.set.mock.calls[0][1]).toMatchObject({mode: 'link', linkTargetUserId: '123'});
+	});
+
+	it('rejects wallet linking for other providers or non-username instances', async () => {
+		const ready = vi.spyOn(service, 'requireReadyConfig');
+		ready.mockResolvedValue(config('https://other.example.com'));
+		await expect(service.startLink({user: {id: 123n}})).rejects.toThrow();
+		ready.mockResolvedValue(config());
+		mode = AccountIdentityModes.EMAIL;
+		await expect(service.startLink({user: {id: 123n}})).rejects.toThrow();
+		expect(cache.set).not.toHaveBeenCalled();
+	});
+
+	it('does not process link state through the ordinary login completion', async () => {
+		vi.spyOn(service, 'requireReadyConfig').mockResolvedValue(config());
+		cache.getAndDelete.mockResolvedValue({mode: 'link', linkTargetUserId: '123'});
+		const exchange = vi.spyOn(service, 'exchangeCode');
+		await expect(
+			service.completeLogin({code: 'code', state: 'state', request: new Request(ISSUER), requestCache: {}}),
+		).rejects.toThrow();
+		expect(exchange).not.toHaveBeenCalled();
+	});
+
+	it('requires the same current user that initiated the link', async () => {
+		vi.spyOn(service, 'requireReadyConfig').mockResolvedValue(config());
+		cache.getAndDelete.mockResolvedValue({mode: 'link', linkTargetUserId: '123'});
+		const exchange = vi.spyOn(service, 'exchangeCode');
+		await expect(service.completeLink({user: {id: 456n}, code: 'code', state: 'state'})).rejects.toThrow();
+		expect(exchange).not.toHaveBeenCalled();
+	});
+
+	it('links a verified wallet to the existing user without issuing a session or changing profile fields', async () => {
+		vi.spyOn(service, 'requireReadyConfig').mockResolvedValue(config());
+		cache.getAndDelete.mockResolvedValue({
+			mode: 'link', linkTargetUserId: '123', nonce: NONCE, codeVerifier: 'verifier', redirectTo: '/project-community?id=7',
+		});
+		vi.spyOn(service, 'exchangeCode').mockResolvedValue({id_token: await sign({wallet_address: WALLET_ADDRESS})});
+		const user = {id: 123n, username: 'existing_user', passwordHash: 'existing_hash'};
+		const bind = vi.spyOn(service, 'bindSsoIdentity').mockResolvedValue(user);
+		await expect(service.completeLink({user, code: 'code', state: 'state'})).resolves.toEqual({
+			linked: true, redirect_to: '/project-community?id=7',
+		});
+		expect(bind).toHaveBeenCalledWith(user, SUBJECT, config());
+		expect(setWalletAddress).toHaveBeenCalledWith({
+			providerId: ISSUER, subject: SUBJECT, userId: 123n, walletAddress: WALLET_ADDRESS.toLowerCase(),
+		});
+		expect(user).toEqual({id: 123n, username: 'existing_user', passwordHash: 'existing_hash'});
+		expect(users.findByEmail).not.toHaveBeenCalled();
+	});
+
+	it('does not transfer an identity already owned by another account', async () => {
+		vi.spyOn(service, 'requireReadyConfig').mockResolvedValue(config());
+		cache.getAndDelete.mockResolvedValue({mode: 'link', linkTargetUserId: '123', nonce: NONCE, codeVerifier: 'verifier'});
+		vi.spyOn(service, 'exchangeCode').mockResolvedValue({id_token: await sign({wallet_address: WALLET_ADDRESS})});
+		vi.spyOn(service, 'bindSsoIdentity').mockRejectedValue(new Error('SSO_IDENTITY_MISMATCH'));
+		await expect(service.completeLink({user: {id: 123n}, code: 'code', state: 'state'})).rejects.toThrow('SSO_IDENTITY_MISMATCH');
+		expect(setWalletAddress).not.toHaveBeenCalled();
 	});
 });

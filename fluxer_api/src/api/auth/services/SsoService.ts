@@ -71,6 +71,8 @@ import {
 } from 'jose';
 
 interface SsoStatePayload {
+	mode?: 'login' | 'link';
+	linkTargetUserId?: string;
 	codeVerifier: string;
 	nonce: string;
 	redirectTo?: string;
@@ -296,13 +298,41 @@ export class SsoService {
 		state: string;
 		redirect_uri: string;
 	}> {
+		return this.startFlow({redirectTo, redirectUri});
+	}
+
+	async startLink({user, redirectTo}: {user: User; redirectTo?: string}) {
+		return this.startFlow({redirectTo, mode: 'link', linkTargetUserId: user.id.toString()});
+	}
+
+	private async startFlow({
+		redirectTo,
+		redirectUri,
+		mode = 'login',
+		linkTargetUserId,
+	}: {
+		redirectTo?: string;
+		redirectUri?: string;
+		mode?: 'login' | 'link';
+		linkTargetUserId?: string;
+	}): Promise<{authorization_url: string; state: string; redirect_uri: string}> {
 		const config = await this.requireReadyConfig();
+		if (
+			mode === 'link' &&
+			(config.issuer !== DAOI_WALLET_SSO_ISSUER ||
+				config.issuerForVerification !== DAOI_WALLET_SSO_ISSUER ||
+				(await this.instanceConfigRepository.getAccountIdentity()).mode !== AccountIdentityModes.USERNAME)
+		) {
+			throw new FeatureTemporarilyDisabledError();
+		}
 		const isMobile = isMobileSsoRedirectUri(redirectUri, config.redirectUri);
 		const state = `${isMobile ? SSO_MOBILE_STATE_PREFIX : ''}${randomHexToken(STATE_BYTE_LENGTH)}`;
 		const codeVerifier = randomBase64Url(CODE_VERIFIER_BYTE_LENGTH);
 		const codeChallenge = buildCodeChallenge(codeVerifier);
 		const nonce = randomBase64Url(NONCE_BYTE_LENGTH);
 		const statePayload: SsoStatePayload = {
+			mode,
+			...(mode === 'link' ? {linkTargetUserId} : {}),
 			codeVerifier,
 			nonce,
 			redirectTo: sanitizeSsoRedirectTo(redirectTo),
@@ -360,7 +390,7 @@ export class SsoService {
 		const config = await this.requireReadyConfig();
 		const {cache} = this.apiContext.services;
 		const statePayload = await cache.getAndDelete<SsoStatePayload>(buildStateCacheKey(state));
-		if (!statePayload) {
+		if (!statePayload || statePayload.mode === 'link' || statePayload.linkTargetUserId !== undefined) {
 			throw InputValidationError.fromCode('state', ValidationErrorCodes.INVALID_OR_EXPIRED_SSO_STATE);
 		}
 		const tokenResponse = await this.exchangeCode({
@@ -387,6 +417,38 @@ export class SsoService {
 			origin: AuthSession.resolveSessionOrigin(this.apiContext, request),
 		});
 		return {token, user_id: user.id.toString(), redirect_to: statePayload.redirectTo ?? ''};
+	}
+
+	async completeLink({user, code, state}: {user: User; code: string; state: string}): Promise<{
+		linked: true;
+		redirect_to: string;
+	}> {
+		const config = await this.requireReadyConfig();
+		const statePayload = await this.apiContext.services.cache.getAndDelete<SsoStatePayload>(buildStateCacheKey(state));
+		if (statePayload?.mode !== 'link' || statePayload.linkTargetUserId !== user.id.toString()) {
+			throw InputValidationError.fromCode('state', ValidationErrorCodes.INVALID_OR_EXPIRED_SSO_STATE);
+		}
+		const tokenResponse = await this.exchangeCode({
+			code,
+			codeVerifier: statePayload.codeVerifier,
+			redirectUri: statePayload.redirectUri ?? config.redirectUri,
+			config,
+		});
+		const claims = await this.resolveClaims(tokenResponse, config, statePayload.nonce);
+		if (!claims.trustedWallet || !claims.walletAddress) {
+			throw InputValidationError.fromCode('sso', ValidationErrorCodes.INVALID_SSO_TOKEN);
+		}
+		await this.bindSsoIdentity(user, claims.sub, config);
+		const updated = await this.ssoIdentityRepository.setWalletAddress({
+			providerId: config.providerId,
+			subject: claims.sub,
+			userId: user.id,
+			walletAddress: claims.walletAddress,
+		});
+		if (!updated) {
+			throw InputValidationError.fromCode('sub', ValidationErrorCodes.SSO_IDENTITY_MISMATCH);
+		}
+		return {linked: true, redirect_to: statePayload.redirectTo ?? ''};
 	}
 
 	private async resolveUserFromClaims(

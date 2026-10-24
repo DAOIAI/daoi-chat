@@ -6,6 +6,7 @@ import {parseAccountRestriction} from '@app/features/auth/state/AccountRestricti
 import type {UserData} from '@app/features/auth/state/AccountStorageContract';
 import Accounts from '@app/features/auth/state/Accounts';
 import Authentication from '@app/features/auth/state/Authentication';
+import type {SudoVerificationPayload} from '@app/features/auth/types/AuthSudoTypes';
 import {type InstanceHTTPTarget, instanceRequest} from '@app/features/platform/transport/InstanceHTTP';
 import {HttpError} from '@app/features/platform/types/EndpointError';
 import {Logger} from '@app/features/platform/utils/AppLogger';
@@ -18,6 +19,7 @@ import type {
 	DesktopHandoffReturnMethod,
 	RegisterRequest,
 	SsoCompleteResponse,
+	SsoLinkCompleteResponse,
 	SsoStartRequest,
 	SsoStartResponse,
 	UsernameAvailabilityResponse,
@@ -845,6 +847,42 @@ export async function completeSso({
 		method: 'POST',
 		path: Endpoints.AUTH_SSO_COMPLETE,
 		target,
+		body: {code, state},
+		headers: withAuthLocaleHeader(),
+	});
+	return response.body;
+}
+
+export async function startSsoLink({
+	verification,
+	redirectTo,
+	target,
+}: {
+	verification: SudoVerificationPayload;
+	redirectTo?: string;
+	target: InstanceHTTPTarget;
+}): Promise<SsoStartResponse> {
+	const response = await instanceRequest<SsoStartResponse>({
+		method: 'POST',
+		path: Endpoints.AUTH_SSO_LINK_START,
+		target,
+		auth: 'session',
+		body: {...verification, redirect_to: redirectTo},
+		headers: withAuthLocaleHeader(),
+	});
+	return response.body;
+}
+
+export async function completeSsoLink({code, state, target}: {
+	code: string;
+	state: string;
+	target: InstanceHTTPTarget;
+}): Promise<SsoLinkCompleteResponse> {
+	const response = await instanceRequest<SsoLinkCompleteResponse>({
+		method: 'POST',
+		path: Endpoints.AUTH_SSO_LINK_COMPLETE,
+		target,
+		auth: 'session',
 		body: {code, state},
 		headers: withAuthLocaleHeader(),
 	});

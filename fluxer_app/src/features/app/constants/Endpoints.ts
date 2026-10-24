@@ -42,6 +42,8 @@ export const Endpoints = {
 	},
 	AUTH_SSO_START: '/auth/sso/start',
 	AUTH_SSO_COMPLETE: '/auth/sso/complete',
+	AUTH_SSO_LINK_START: '/auth/sso/link/start',
+	AUTH_SSO_LINK_COMPLETE: '/auth/sso/link/complete',
 	ADMIN_INSTANCE_CONFIG: '/admin/instance/config',
 	ADMIN_INSTANCE_CONFIG_BRANDING_ASSETS: '/admin/instance/config/branding-assets',
 	ADMIN_INSTANCE_CONFIG_SMTP_TESTS: '/admin/instance/config/smtp-tests',

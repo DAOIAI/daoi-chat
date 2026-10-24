@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {RuntimeConfigSnapshot} from '@app/features/app/state/InstanceSnapshotStore';
+import {type RuntimeConfigSnapshot, runtimeInstanceKey} from '@app/features/app/state/InstanceSnapshotStore';
+import RuntimeConfig from '@app/features/app/state/RuntimeConfig';
 import * as AuthenticationCommands from '@app/features/auth/commands/AuthenticationCommands';
 import type {UserData} from '@app/features/auth/state/AccountStorageContract';
-import {isValidOAuthState, storeSsoPendingContext} from '@app/features/auth/state/SsoPendingContext';
+import Authentication from '@app/features/auth/state/Authentication';
+import {isValidOAuthState, type SsoPendingContext, storeSsoPendingContext} from '@app/features/auth/state/SsoPendingContext';
+import type {SudoVerificationPayload} from '@app/features/auth/types/AuthSudoTypes';
 import {safeRedirectTarget} from '@app/features/auth/utils/SafeRedirect';
 import {type InstanceHTTPTarget, instanceTargetFromSnapshot} from '@app/features/platform/transport/InstanceHTTP';
 import {Logger} from '@app/features/platform/utils/AppLogger';
@@ -227,6 +230,55 @@ export async function completeSsoLogin({
 		...toLoginSuccessPayload(result),
 		redirect_to: result.redirect_to,
 	};
+}
+
+export class SsoLinkContextMismatchError extends Error {
+	constructor() {
+		super('The active account or instance changed during wallet linking');
+		this.name = 'SsoLinkContextMismatchError';
+	}
+}
+
+export function isSsoLinkContextCurrent(context: SsoPendingContext | null): boolean {
+	const current = RuntimeConfig.getSnapshotOrNull();
+	return Authentication.isAuthenticated && context?.mode === 'link' && context.linkTargetUserId === Authentication.currentUserId &&
+		context.runtimeSnapshot !== null && current !== null &&
+		runtimeInstanceKey(context.runtimeSnapshot) !== null &&
+		runtimeInstanceKey(context.runtimeSnapshot) === runtimeInstanceKey(current);
+}
+
+export async function startSsoLink({redirectTo, runtimeSnapshot, linkTargetUserId, verification}: {
+	redirectTo?: string | null;
+	runtimeSnapshot: RuntimeConfigSnapshot;
+	linkTargetUserId: string;
+	verification: SudoVerificationPayload;
+}): Promise<StartSsoLoginResult> {
+	const context: SsoPendingContext = {
+		mode: 'link', linkTargetUserId, runtimeSnapshot, redirectTo: safeRedirectTarget(redirectTo),
+	};
+	if (!isSsoLinkContextCurrent(context)) throw new SsoLinkContextMismatchError();
+	const result = await AuthenticationCommands.startSsoLink({
+		verification, redirectTo: context.redirectTo ?? undefined, target: instanceTargetFromSnapshot(runtimeSnapshot),
+	});
+	if (!isSsoLinkContextCurrent(context)) throw new SsoLinkContextMismatchError();
+	const state = result.state ?? ssoStateFromAuthorizationUrl(result.authorization_url);
+	if (!state || !isValidOAuthState(state)) throw new Error('Wallet link returned an invalid OAuth state');
+	// Linking must retain its original account context before leaving this page.
+	await storeSsoPendingContext(state, context);
+	return {authorizationUrl: result.authorization_url, redirectUri: result.redirect_uri, state};
+}
+
+export async function completeSsoLink({code, state, context}: {
+	code: string;
+	state: string;
+	context: SsoPendingContext;
+}): Promise<{linked: true; redirect_to: string}> {
+	if (!isSsoLinkContextCurrent(context) || !context.runtimeSnapshot) throw new SsoLinkContextMismatchError();
+	const result = await AuthenticationCommands.completeSsoLink({
+		code, state, target: instanceTargetFromSnapshot(context.runtimeSnapshot),
+	});
+	if (!isSsoLinkContextCurrent(context)) throw new SsoLinkContextMismatchError();
+	return result;
 }
 
 export type PasswordResetResult =

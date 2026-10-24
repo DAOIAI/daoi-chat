@@ -13,6 +13,7 @@ const PENDING_SSO_CONTEXT_MAX_ENTRIES = 16;
 const PENDING_SSO_CONTEXT_JSON_MAX_LENGTH = 262_144;
 const OAUTH_STATE_MAX_LENGTH = 512;
 const STORED_SSO_PENDING_CONTEXT_KEYS: ReadonlyArray<string> = ['createdAtMs', 'expiresAtMs', 'instance', 'redirectTo'];
+const STORED_SSO_LINK_CONTEXT_KEYS = [...STORED_SSO_PENDING_CONTEXT_KEYS, 'mode', 'linkTargetUserId'];
 
 export const LEGACY_SSO_REDIRECT_TO_STORAGE_KEY = 'fluxer:sso:redirect_to';
 
@@ -21,6 +22,8 @@ const logger = new Logger('SsoPendingContext');
 export interface SsoPendingContext {
 	readonly redirectTo: string | null;
 	readonly runtimeSnapshot: RuntimeConfigSnapshot | null;
+	readonly mode?: 'login' | 'link';
+	readonly linkTargetUserId?: string;
 }
 
 interface StoredSsoPendingContext extends SsoPendingContext {
@@ -118,7 +121,7 @@ function parseStoredContext(raw: string, nowMs: number): StoredSsoPendingContext
 	} catch {
 		return null;
 	}
-	if (!isExactRecord(value, STORED_SSO_PENDING_CONTEXT_KEYS)) {
+	if (!isExactRecord(value, STORED_SSO_PENDING_CONTEXT_KEYS) && !isExactRecord(value, STORED_SSO_LINK_CONTEXT_KEYS)) {
 		return null;
 	}
 	const createdAtMs = value['createdAtMs'];
@@ -139,6 +142,13 @@ function parseStoredContext(raw: string, nowMs: number): StoredSsoPendingContext
 	const redirectTo = parseStoredRedirect(value['redirectTo']);
 	if (redirectTo === undefined) {
 		return null;
+	}
+	if (Object.hasOwn(value, 'mode')) {
+		const linkTargetUserId = value['linkTargetUserId'];
+		if (value['mode'] !== 'link' || typeof linkTargetUserId !== 'string' || !/^\d+$/.test(linkTargetUserId) || runtimeSnapshot === null) {
+			return null;
+		}
+		return {createdAtMs, redirectTo, runtimeSnapshot, mode: 'link', linkTargetUserId};
 	}
 	return {createdAtMs, redirectTo, runtimeSnapshot};
 }
@@ -182,12 +192,19 @@ function pruneStoredContexts(retainedEntries: number, excludedKey: string | null
 			.slice(0, retainedEntries)
 			.map((entry) => [
 				entry.key,
-				{redirectTo: entry.context.redirectTo, runtimeSnapshot: entry.context.runtimeSnapshot},
+				{
+					redirectTo: entry.context.redirectTo,
+					runtimeSnapshot: entry.context.runtimeSnapshot,
+					...(entry.context.mode === 'link' ? {mode: 'link' as const, linkTargetUserId: entry.context.linkTargetUserId} : {}),
+				},
 			]),
 	);
 }
 
 function serializeStoredContext(createdAtMs: number, context: SsoPendingContext): string {
+	if (context.mode === 'link' && (!context.runtimeSnapshot || !context.linkTargetUserId || !/^\d+$/.test(context.linkTargetUserId))) {
+		throw new Error('SSO wallet linking requires its original account and instance');
+	}
 	let redirectTo: string | null = null;
 	if (context.redirectTo != null) {
 		redirectTo = safeRedirectTarget(context.redirectTo);
@@ -200,6 +217,7 @@ function serializeStoredContext(createdAtMs: number, context: SsoPendingContext)
 		expiresAtMs: createdAtMs + PENDING_SSO_CONTEXT_TTL_MS,
 		instance: context.runtimeSnapshot,
 		redirectTo,
+		...(context.mode === 'link' ? {mode: 'link', linkTargetUserId: context.linkTargetUserId} : {}),
 	});
 	if (serialized.length > PENDING_SSO_CONTEXT_JSON_MAX_LENGTH) {
 		throw new Error('SSO pending context exceeds its storage contract');

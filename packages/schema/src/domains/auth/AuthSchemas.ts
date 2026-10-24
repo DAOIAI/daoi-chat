@@ -356,6 +356,23 @@ export const SsoCompleteRequest = z.object({
 
 export type SsoCompleteRequest = z.infer<typeof SsoCompleteRequest>;
 
+export const SsoLinkStartRequest = SudoVerificationSchema.extend({
+	redirect_to: createStringType(0, 2048).nullish().describe('URL to return to after linking the wallet'),
+});
+
+export type SsoLinkStartRequest = z.infer<typeof SsoLinkStartRequest>;
+
+export const SsoLinkCompleteRequest = SsoCompleteRequest;
+
+export type SsoLinkCompleteRequest = z.infer<typeof SsoLinkCompleteRequest>;
+
+export const SsoLinkCompleteResponse = z.object({
+	linked: z.literal(true).describe('Whether the wallet was linked to the current account'),
+	redirect_to: z.string().describe('URL to return to after linking the wallet'),
+});
+
+export type SsoLinkCompleteResponse = z.infer<typeof SsoLinkCompleteResponse>;
+
 export const MfaTotpRequest = z.object({
 	code: createStringType().describe('The TOTP code from the authenticator app'),
 	ticket: createStringType().describe('The MFA ticket from the login response'),

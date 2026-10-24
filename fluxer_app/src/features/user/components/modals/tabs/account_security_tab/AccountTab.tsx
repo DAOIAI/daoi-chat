@@ -5,9 +5,14 @@ import {UnclaimedAccountAlert} from '@app/features/app/components/dialogs/compon
 import RuntimeConfig from '@app/features/app/state/RuntimeConfig';
 import {openClaimAccountModal} from '@app/features/auth/components/modals/ClaimAccountModal';
 import {canResendVerificationEmail} from '@app/features/auth/hooks/useVerifyEmailAction';
+import {useSudo} from '@app/features/auth/hooks/useSudo';
+import {SsoLinkContextMismatchError, startSsoLink} from '@app/features/auth/state/AuthFlow';
+import * as RouterUtils from '@app/features/navigation/utils/RouterUtils';
+import {isAbortError} from '@app/features/platform/utils/PlatformHelpers';
 import {Button} from '@app/features/ui/button/Button';
 import * as ModalCommands from '@app/features/ui/commands/ModalCommands';
 import {modal} from '@app/features/ui/commands/ModalCommands';
+import {navigateToExternalURL} from '@app/features/ui/utils/NativeUtils';
 import {EmailChangeModal} from '@app/features/user/components/modals/EmailChangeModal';
 import {PasswordChangeModal} from '@app/features/user/components/modals/PasswordChangeModal';
 import {
@@ -28,7 +33,7 @@ import {
 import {msg} from '@lingui/core/macro';
 import {Trans, useLingui} from '@lingui/react/macro';
 import {observer} from 'mobx-react-lite';
-import type React from 'react';
+import {type FC, useState} from 'react';
 
 const SIGN_IN_METHODS_DESCRIPTOR = msg({
 	message: 'Sign-in methods',
@@ -47,10 +52,47 @@ interface AccountTabProps {
 	setShowMaskedEmail: (show: boolean) => void;
 }
 
-export const AccountTabContent: React.FC<AccountTabProps> = observer(
+export const AccountTabContent: FC<AccountTabProps> = observer(
 	({user, isClaimed, showMaskedEmail, setShowMaskedEmail}) => {
 		const {i18n} = useLingui();
 		const usesUsernameSignIn = RuntimeConfig.usesUsernameSignIn;
+		const sudo = useSudo();
+		const [linkingWallet, setLinkingWallet] = useState(false);
+		const [walletLinkError, setWalletLinkError] = useState<string | null>(null);
+		const showWalletLink = usesUsernameSignIn && RuntimeConfig.getSnapshotOrNull()?.sso?.enabled === true;
+		const walletCopy = i18n.locale.startsWith('zh') ? {
+			label: 'DAOI 钱包',
+			description: '绑定后，用钱包登录仍进入这个账号，已有群、私聊和历史继续保留。',
+			button: '绑定 DAOI 钱包',
+			error: '暂时无法开始钱包绑定，请重试。',
+			changed: '当前账号或聊天服务器已变化，请重新打开账号设置。',
+		} : {
+			label: 'DAOI wallet',
+			description: 'Sign in to this same account with your wallet. Keep your communities, chats and history.',
+			button: 'Link DAOI wallet',
+			error: 'Wallet linking could not be started. Please try again.',
+			changed: 'The active account or chat server changed. Reopen account settings.',
+		};
+		const linkWallet = async () => {
+			if (linkingWallet) return;
+			setLinkingWallet(true);
+			setWalletLinkError(null);
+			try {
+				const verification = await sudo.require();
+				const {authorizationUrl} = await startSsoLink({
+					verification,
+					linkTargetUserId: user.id,
+					runtimeSnapshot: RuntimeConfig.getSnapshot(),
+					redirectTo: RouterUtils.getCurrentPath(),
+				});
+				sudo.finalize();
+				await navigateToExternalURL(authorizationUrl);
+			} catch (error) {
+				if (!isAbortError(error)) setWalletLinkError(error instanceof SsoLinkContextMismatchError ? walletCopy.changed : walletCopy.error);
+			} finally {
+				setLinkingWallet(false);
+			}
+		};
 		const emailRow = usesUsernameSignIn ? null : isClaimed ? (
 			<AccountSecurityRow
 				label={<Trans>Email address</Trans>}
@@ -171,6 +213,19 @@ export const AccountTabContent: React.FC<AccountTabProps> = observer(
 				>
 					{emailRow}
 					{passwordRow}
+					{showWalletLink && isClaimed && (
+						<AccountSecurityRow
+							label={walletCopy.label}
+							description={walletCopy.description}
+							warning={walletLinkError ? <span role="alert">{walletLinkError}</span> : null}
+							data-flx="user.account-security-tab.account-tab.wallet-row"
+						>
+							<Button variant="secondary" small={true} submitting={linkingWallet} disabled={linkingWallet}
+								onClick={linkWallet} data-flx="user.account-security-tab.account-tab.button.link-wallet">
+								{walletCopy.button}
+							</Button>
+						</AccountSecurityRow>
+					)}
 					{usesUsernameSignIn && isClaimed && (
 						<RecoveryKitRow
 							user={user}
