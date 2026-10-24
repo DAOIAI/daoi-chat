@@ -95,8 +95,10 @@ interface ResolvedSsoConfig extends InstanceSsoConfig {
 }
 
 interface ResolvedSsoClaims {
-	email: string;
+	email: string | null;
 	emailVerified: boolean;
+	trustedWallet: boolean;
+	walletAddress?: string;
 	name?: string | null;
 	sub: string;
 }
@@ -118,6 +120,8 @@ interface JwksCacheEntry {
 const CODE_VERIFIER_BYTE_LENGTH = 32;
 const STATE_BYTE_LENGTH = 16;
 const NONCE_BYTE_LENGTH = 16;
+const DAOI_WALLET_SSO_ISSUER = 'https://auth.chat.daoi.ai';
+const UUID_SUBJECT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 let ssoLogger: LoggerInterface | undefined;
 
@@ -202,7 +206,7 @@ function readStringClaim(
 	return typeof value === 'string' ? value : undefined;
 }
 
-function parseTestProviderClaims(rawPayload: string): ResolvedSsoClaims {
+function parseTestProviderClaims(rawPayload: string): ResolvedSsoClaims & {email: string} {
 	const parsed = rawPayload.trim().startsWith('{') ? parseJsonRecord(rawPayload) : null;
 	const rawEmail = parsed ? readStringClaim(parsed, 'email') : rawPayload;
 	if (!rawEmail) {
@@ -212,7 +216,7 @@ function parseTestProviderClaims(rawPayload: string): ResolvedSsoClaims {
 	const sub = normalizeSsoSubject(parsed ? (readStringClaim(parsed, 'sub') ?? email) : email);
 	const emailVerified = parsed ? (coerceEmailVerified(parsed['email_verified']) ?? true) : true;
 	const name = parsed ? (readStringClaim(parsed, 'name') ?? 'Test SSO User') : 'Test SSO User';
-	return {email, emailVerified, name, sub};
+	return {email, emailVerified, trustedWallet: false, name, sub};
 }
 
 function readMatchingEmailVerified(
@@ -317,6 +321,9 @@ export class SsoService {
 			code_challenge_method: 'S256',
 			nonce,
 		});
+		if (config.issuer === DAOI_WALLET_SSO_ISSUER && config.issuerForVerification === DAOI_WALLET_SSO_ISSUER) {
+			searchParams.set('prompt', 'login');
+		}
 		let authorizationUrlString: string;
 		try {
 			const authorizationUrl = new URL(config.authorizationUrl ?? '');
@@ -364,6 +371,17 @@ export class SsoService {
 		});
 		const claims = await this.resolveClaims(tokenResponse, config, statePayload.nonce);
 		const user = await this.resolveUserFromClaims(claims, config, requestCache);
+		if (claims.trustedWallet && claims.walletAddress) {
+			const updated = await this.ssoIdentityRepository.setWalletAddress({
+				providerId: config.providerId,
+				subject: claims.sub,
+				userId: user.id,
+				walletAddress: claims.walletAddress,
+			});
+			if (!updated) {
+				throw InputValidationError.fromCode('sub', ValidationErrorCodes.SSO_IDENTITY_MISMATCH);
+			}
+		}
 		const [token] = await AuthSession.createAuthSession(this.apiContext, {
 			user,
 			origin: AuthSession.resolveSessionOrigin(this.apiContext, request),
@@ -376,10 +394,10 @@ export class SsoService {
 		config: ResolvedSsoConfig,
 		requestCache: RequestCache,
 	): Promise<User> {
-		if (!claims.emailVerified) {
+		if (!claims.trustedWallet && !claims.emailVerified) {
 			throw InputValidationError.fromCode('email_verified', ValidationErrorCodes.INVALID_SSO_TOKEN);
 		}
-		const emailLower = claims.email.toLowerCase();
+		const emailLower = claims.email?.toLowerCase() ?? null;
 		getLogger().info(
 			usesUsernameSignIn() ? {has_sub: true} : {email: emailLower, has_sub: true},
 			'SSO login with sub claim',
@@ -397,9 +415,11 @@ export class SsoService {
 			return this.bindSsoIdentity(user, claims.sub, config);
 		}
 		const {users} = this.apiContext.services;
-		const existingUser = await users.findByEmail(emailLower);
-		if (existingUser) {
-			return this.bindSsoIdentity(existingUser, claims.sub, config);
+		if (!claims.trustedWallet && emailLower) {
+			const existingUser = await users.findByEmail(emailLower);
+			if (existingUser) {
+				return this.bindSsoIdentity(existingUser, claims.sub, config);
+			}
 		}
 		AuthUtility.assertNetworkAllowed(this.apiContext);
 		if (!config.autoProvision) {
@@ -409,7 +429,9 @@ export class SsoService {
 		if (registrationConfig.mode === 'closed') {
 			throw new RegistrationClosedError();
 		}
-		await assertEmailNotBlocklisted(emailLower, 'email');
+		if (emailLower) {
+			await assertEmailNotBlocklisted(emailLower, 'email');
+		}
 		const pendingApproval = registrationConfig.mode === 'approval';
 		const autoJoinInviteCode = this.apiContext.services.config.instance.autoJoinInviteCode?.trim() || null;
 		const user = await this.provisionUserFromClaims(claims, config, {pendingApproval, autoJoinInviteCode});
@@ -487,7 +509,7 @@ export class SsoService {
 		const usernameMode = accountIdentity.mode === AccountIdentityModes.USERNAME;
 		const uniqueUsernames = accountIdentity.tagStyle === TagStyles.NONE;
 		const userId = (await snowflake.generate()) as UserID;
-		const baseName = claims.name?.trim() || claims.email.split('@')[0] || generateRandomUsername();
+		const baseName = claims.name?.trim() || claims.email?.split('@')[0] || generateRandomUsername();
 		const derivedUsername = deriveUsernameFromDisplayName(baseName) ?? generateRandomUsername();
 		const username = uniqueUsernames ? await deriveAvailableUsername(users, derivedUsername) : derivedUsername;
 		const discriminator = uniqueUsernames ? USERNAME_MODE_DISCRIMINATOR : await this.allocateDiscriminator(username);
@@ -516,7 +538,7 @@ export class SsoService {
 			global_name: globalName,
 			bot: false,
 			system: false,
-			email: usernameMode ? null : claims.email.toLowerCase(),
+			email: usernameMode ? null : (claims.email?.toLowerCase() ?? null),
 			email_verified: claims.emailVerified,
 			email_bounced: false,
 			timezone_privacy_flags: ProfileFieldPrivacyFlags.EVERYONE,
@@ -650,6 +672,34 @@ export class SsoService {
 			throw InputValidationError.fromCode('sub', ValidationErrorCodes.INVALID_SSO_TOKEN);
 		}
 		const sub = normalizeSsoSubject(rawSub);
+		if (
+			config.issuer === DAOI_WALLET_SSO_ISSUER &&
+			config.issuerForVerification === DAOI_WALLET_SSO_ISSUER &&
+			claims?.iss === DAOI_WALLET_SSO_ISSUER &&
+			config.jwksUrl &&
+			(await this.instanceConfigRepository.getAccountIdentity()).mode === AccountIdentityModes.USERNAME
+		) {
+			if (!idTokenSub || !UUID_SUBJECT_PATTERN.test(idTokenSub)) {
+				throw InputValidationError.fromCode('sub', ValidationErrorCodes.INVALID_SSO_TOKEN);
+			}
+			const walletAddress = readStringClaim(claims, 'wallet_address') ?? readStringClaim(userInfo, 'wallet_address');
+			if (walletAddress !== undefined && !/^0x[0-9a-f]{40}$/i.test(walletAddress)) {
+				throw InputValidationError.fromCode('wallet_address', ValidationErrorCodes.INVALID_SSO_TOKEN);
+			}
+			return {
+				email: null,
+				emailVerified: false,
+				trustedWallet: true,
+				walletAddress: walletAddress?.toLowerCase(),
+				name:
+					readStringClaim(claims, 'preferred_username') ??
+					readStringClaim(userInfo, 'preferred_username') ??
+					readStringClaim(claims, 'name') ??
+					readStringClaim(userInfo, 'name') ??
+					null,
+				sub,
+			};
+		}
 		const idTokenEmail = readStringClaim(claims, 'email');
 		const userInfoEmail = readStringClaim(userInfo, 'email');
 		const normalizedIdTokenEmail = idTokenEmail ? normalizeSsoEmail(idTokenEmail) : undefined;
@@ -677,7 +727,7 @@ export class SsoService {
 		}
 		const name = readStringClaim(primaryClaims, 'name') ?? null;
 		validateEmailAgainstAllowlist(email, config.allowedEmailDomains);
-		const resolvedClaims: ResolvedSsoClaims = {email, emailVerified, name, sub};
+		const resolvedClaims: ResolvedSsoClaims = {email, emailVerified, trustedWallet: false, name, sub};
 		return resolvedClaims;
 	}
 

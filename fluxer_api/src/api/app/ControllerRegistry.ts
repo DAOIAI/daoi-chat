@@ -9,6 +9,7 @@ import {BlueskyOAuthController} from '@app/api/bluesky/BlueskyOAuthController';
 import {registerChannelControllers} from '@app/api/channel/controllers/index';
 import type {APIConfig} from '@app/api/config/APIConfig';
 import {ConnectionController} from '@app/api/connection/ConnectionController';
+import {ProjectCommunityController} from '@app/api/daoi/ProjectCommunityController';
 import {DonationController} from '@app/api/donation/DonationController';
 import {DownloadController} from '@app/api/download/DownloadController';
 import {ExperimentController} from '@app/api/experiment/ExperimentController';
@@ -44,6 +45,7 @@ export function registerControllers(routes: HonoApp, config: APIConfig): void {
 	GeolocationController(routes);
 	registerAdminControllers(routes);
 	AuthController(routes);
+	ProjectCommunityController(routes);
 	OriginHandoffController(routes);
 	PasskeyBridgeController(routes);
 	AttachmentController(routes);

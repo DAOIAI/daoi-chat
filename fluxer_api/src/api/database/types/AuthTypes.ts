@@ -75,6 +75,7 @@ export interface UserSsoIdentityRow {
 	subject: string;
 	user_id: UserID;
 	claimed_at: Date;
+	wallet_address: string | null;
 }
 
 export interface AuthorizedIpRow {
@@ -174,6 +175,7 @@ export const USER_SSO_IDENTITY_COLUMNS = [
 	'subject',
 	'user_id',
 	'claimed_at',
+	'wallet_address',
 ] as const satisfies ReadonlyArray<keyof UserSsoIdentityRow>;
 export const AUTHORIZED_IP_COLUMNS = ['user_id', 'ip'] as const satisfies ReadonlyArray<keyof AuthorizedIpRow>;
 export const AUTHORIZED_IP_TRUST_KEY_COLUMNS = ['user_id', 'trust_key'] as const satisfies ReadonlyArray<

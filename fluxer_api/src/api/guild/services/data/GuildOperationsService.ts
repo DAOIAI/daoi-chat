@@ -322,6 +322,7 @@ export class GuildOperationsService {
 			user: User;
 			data: GuildCreateRequest;
 			locale?: string | null;
+			reservedGuildId?: GuildID;
 		},
 		_auditLogReason?: string | null,
 	): Promise<GuildResponse> {
@@ -341,7 +342,7 @@ export class GuildOperationsService {
 			DEFAULT_STOCK_LIMITS.max_guilds,
 		);
 		if (currentGuildCount >= maxGuilds) throw new MaxGuildsError(maxGuilds);
-		const guildId = createGuildID(await this.snowflakeService.generate());
+		const guildId = params.reservedGuildId ?? createGuildID(await this.snowflakeService.generate());
 		contentModerationService.scanText(data.name, {
 			userId: user.id,
 			guildId,
