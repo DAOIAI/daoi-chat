@@ -8,9 +8,9 @@ import * as path from 'node:path';
 import {parseArgs} from 'node:util';
 
 const CHANNEL_DATA_DIRECTORIES = Object.freeze({
-	stable: 'fluxer',
-	canary: 'fluxercanary',
-	development: 'fluxerdevelopment',
+	stable: 'daoichat',
+	canary: 'daoichatcanary',
+	development: 'daoichatdevelopment',
 });
 const SERVED_RENDERER_PATTERN = /Serving the renderer: source=(\S+) version=(\S+) bundled=(\S+)/gu;
 const REPORTED_BUILD_PATTERN = /The renderer reported its build: (.+)$/gmu;
@@ -147,11 +147,11 @@ function stageApp(options, sandbox) {
 			.find((candidate) => {
 				const stats = fs.statSync(candidate);
 				const name = path.basename(candidate);
-				if (!stats.isFile() || !/^fluxer/iu.test(name)) return false;
+				if (!stats.isFile() || !/^DAOI Chat/iu.test(name)) return false;
 				if (process.platform === 'win32') return /\.exe$/iu.test(name) && !/_ExecutionStub\.exe$/iu.test(name);
 				return (stats.mode & 0o111) !== 0;
 			});
-		if (executable == null) fail(`${options.app} holds no fluxer executable`);
+		if (executable == null) fail(`${options.app} holds no DAOI Chat executable`);
 		return {executable, portableRoot: path.join(staged, 'data')};
 	}
 	const staged = path.join(sandbox, path.basename(options.app));

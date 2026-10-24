@@ -9,46 +9,46 @@ const {promisify} = require('node:util');
 const execFileAsync = promisify(execFile);
 const CHANNELS = {
 	stable: {
-		productName: 'Fluxer',
+		productName: 'DAOI Chat',
 		linuxOptDirName: 'Fluxer',
-		artifactProductName: 'Fluxer',
-		appId: 'app.fluxer',
+		artifactProductName: 'DAOI-Chat',
+		appId: 'ai.daoi.chat',
 		iconDirectory: 'icons-stable',
-		packageName: 'fluxer_desktop',
+		packageName: 'daoi_chat_desktop',
 		linuxPackageName: 'fluxer',
 		linuxDesktopId: 'app.fluxer.FluxerDesktop',
 		linuxComment: 'Instant messaging and VoIP',
-		protocolScheme: 'fluxer',
+		protocolScheme: 'daoichat',
 		macEntitlements: 'build_resources/entitlements.mac.stable.plist',
 		notarize: true,
 		provisioningProfile: 'build_resources/profiles/Fluxer.provisionprofile',
 	},
 	canary: {
-		productName: 'Fluxer Canary',
+		productName: 'DAOI Chat Canary',
 		linuxOptDirName: 'fluxer-canary',
-		artifactProductName: 'Fluxer-Canary',
-		appId: 'app.fluxer.canary',
+		artifactProductName: 'DAOI-Chat-Canary',
+		appId: 'ai.daoi.chat.canary',
 		iconDirectory: 'icons-canary',
-		packageName: 'fluxer_desktop_canary',
+		packageName: 'daoi_chat_desktop_canary',
 		linuxPackageName: 'fluxer-canary',
 		linuxDesktopId: 'app.fluxer.FluxerDesktopCanary',
 		linuxComment: 'Canary build of Fluxer',
-		protocolScheme: 'fluxer',
+		protocolScheme: 'daoichat-canary',
 		macEntitlements: 'build_resources/entitlements.mac.canary.plist',
 		notarize: true,
 		provisioningProfile: 'build_resources/profiles/Fluxer_Canary.provisionprofile',
 	},
 	development: {
-		productName: 'Fluxer Development',
+		productName: 'DAOI Chat Development',
 		linuxOptDirName: 'fluxer-development',
-		artifactProductName: 'Fluxer-Development',
-		appId: 'app.fluxer.development',
+		artifactProductName: 'DAOI-Chat-Development',
+		appId: 'ai.daoi.chat.development',
 		iconDirectory: 'icons-development',
-		packageName: 'fluxer_desktop_development',
+		packageName: 'daoi_chat_desktop_development',
 		linuxPackageName: 'fluxer-development',
 		linuxDesktopId: 'app.fluxer.FluxerDesktopDevelopment',
 		linuxComment: 'Development build of Fluxer',
-		protocolScheme: 'fluxer-development',
+		protocolScheme: 'daoichat-development',
 		macEntitlements: 'build_resources/entitlements.mac.development.plist',
 		notarize: false,
 		provisioningProfile: null,
@@ -84,7 +84,7 @@ const linuxOptDirName = channel.linuxOptDirName;
 const installedProductName = isLinuxBuild ? linuxOptDirName : productName;
 const artifactProductName = channel.artifactProductName;
 const appId = channel.appId;
-const iconDir = channel.iconDirectory;
+const iconDir = targetPlatform === 'win32' ? 'icons-daoi' : channel.iconDirectory;
 const packageName = channel.packageName;
 const linuxPackageName = channel.linuxPackageName;
 const linuxDesktopId = channel.linuxDesktopId;

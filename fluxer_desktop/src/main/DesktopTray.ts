@@ -27,12 +27,12 @@ const ICON_DIR_NAMES: Record<BuildChannel, string> = {
 	development: 'icons-development',
 };
 const TRAY_POSITION_GUIDS: Record<BuildChannel, string> = {
-	stable: '11c70c9f-a35d-4328-9040-f722dc5fa0a0',
-	canary: '1a39981b-b4cc-46a4-8f7e-9fce187110f5',
-	development: 'd0070fe2-067b-419c-af26-6fd197700d63',
+	stable: '87c6b400-e718-4850-8612-b23caf2d947e',
+	canary: '46224782-7354-46da-a6ca-1138974f89d5',
+	development: 'c2eb615d-59fc-4899-97db-6fdfebd159f0',
 };
 const APP_NAME = DESKTOP_APP_NAME;
-const ICON_DIR_NAME = ICON_DIR_NAMES[BUILD_CHANNEL];
+const ICON_DIR_NAME = process.platform === 'win32' ? 'icons-daoi' : ICON_DIR_NAMES[BUILD_CHANNEL];
 const TRAY_POSITION_GUID = TRAY_POSITION_GUIDS[BUILD_CHANNEL];
 
 interface DesktopTrayController {

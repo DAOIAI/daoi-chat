@@ -1,0 +1,188 @@
+name: DAOI Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: 'Optional calver (YYYY.MDD.MICRO); defaults to this run'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BUILD_CHANNEL: stable
+  RELEASE_CHANNEL: stable
+  PUBLIC_RELEASE_CHANNEL: stable
+  FLUXER_MODULES: '0'
+
+jobs:
+  renderer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      source_sha: ${{ steps.meta.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: '1.98.1'
+          targets: wasm32-unknown-unknown
+      - name: Set build metadata
+        id: meta
+        env:
+          FLUXER_BUILD_VERSION: ${{ inputs.build_version }}
+        run: cargo run --locked --quiet --manifest-path tools/ci/Cargo.toml -- build-desktop --step set_metadata --channel stable
+      - name: Export build version
+        run: |
+          echo "VERSION=${{ steps.meta.outputs.version }}" >> "$GITHUB_ENV"
+          echo "BUILD_VERSION=${{ steps.meta.outputs.version }}" >> "$GITHUB_ENV"
+          echo "PUBLIC_BUILD_VERSION=${{ steps.meta.outputs.version }}" >> "$GITHUB_ENV"
+          echo "SOURCE_SHA=${{ steps.meta.outputs.source_sha }}" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 26
+      - name: Set up pnpm
+        run: cargo run --locked --quiet --manifest-path tools/ci/Cargo.toml -- build-desktop --step setup_pnpm
+      - name: Install upstream dependencies
+        working-directory: fluxer_desktop
+        run: cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step install_dependencies
+      - name: Build the bundled renderer
+        working-directory: fluxer_desktop
+        run: |
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step set_build_channel
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step build_shared_assets
+      - name: Stage renderer
+        run: cargo run --locked --quiet --manifest-path tools/ci/Cargo.toml -- build-desktop --step prepare_shared_assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: daoi-windows-renderer
+          path: desktop-shared-assets
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  build:
+    needs: renderer
+    runs-on: windows-2025
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      VERSION: ${{ needs.renderer.outputs.version }}
+      BUILD_VERSION: ${{ needs.renderer.outputs.version }}
+      PUBLIC_BUILD_VERSION: ${{ needs.renderer.outputs.version }}
+      SOURCE_SHA: ${{ needs.renderer.outputs.source_sha }}
+      ARCH: ${{ matrix.arch }}
+      ELECTRON_ARCH: ${{ matrix.arch }}
+      PLATFORM: windows
+      DESKTOP_PLATFORM: windows
+      DESKTOP_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.renderer.outputs.source_sha }}
+          path: source
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: '1.98.1'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14'
+      - name: Prepare Python and short Windows paths
+        env:
+          SUBST_TARGET: ${{ github.workspace }}/source
+        run: |
+          cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step ensure_python3_windows
+          cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step windows_paths
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 26
+      - name: Set up pnpm
+        run: cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step setup_pnpm
+      - name: Install ARM64 tools
+        if: matrix.arch == 'arm64'
+        run: |
+          cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step install_setuptools_windows_arm64
+          cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step install_msvc_arm64_tools
+      - uses: TheMrMilchmann/setup-msvc-dev@368ef7d1ee4d1171b31d4a7f67f4d954f903f5a9
+        with:
+          arch: ${{ matrix.arch == 'arm64' && 'amd64_arm64' || 'amd64' }}
+      - name: Install Rust Windows targets
+        run: cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step install_rust_windows_targets
+      - name: Install dependencies and set version
+        working-directory: W:/fluxer_desktop
+        run: |
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step install_dependencies
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step update_version
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step set_build_channel
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: daoi-windows-renderer
+          path: source/desktop-shared-assets
+      - name: Restore renderer
+        run: cargo run --locked --quiet --manifest-path source/tools/ci/Cargo.toml -- build-desktop --step restore_shared_assets
+      - name: Build upstream Electron shell and native modules
+        working-directory: W:/fluxer_desktop
+        env:
+          NODE_ENV: production
+          FLUXER_DESKTOP_PRODUCTION: 'true'
+        run: pnpm build --use-shared-renderer
+      - name: Package upstream Electron app
+        working-directory: W:/fluxer_desktop
+        run: cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step build_app_windows
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: 10.0.x
+      - name: Build DAOI installer and portable ZIP
+        working-directory: W:/fluxer_desktop
+        run: |
+          cargo run --locked --quiet --manifest-path ../tools/ci/Cargo.toml -- build-desktop --step install_velopack_cli
+          ./scripts/package-daoi-windows.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: daoi-windows-${{ matrix.arch }}-${{ needs.renderer.outputs.version }}
+          path: source/upload_staging
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  install-check:
+    needs: [renderer, build]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-2025
+          - arch: arm64
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.renderer.outputs.source_sha }}
+          sparse-checkout: fluxer_desktop/scripts
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: daoi-windows-${{ matrix.arch }}-${{ needs.renderer.outputs.version }}
+          path: packages
+      - name: Install and launch the packaged renderer
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem packages/*-setup-win-${{ matrix.arch }}.exe | Select-Object -First 1
+          $process = Start-Process $setup.FullName -ArgumentList '--silent' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          $installed = Join-Path $env:LOCALAPPDATA 'daoi_chat_desktop/current'
+          if (!(Test-Path "$installed/DAOI Chat.exe")) { throw 'Installed executable not found' }
+          Get-Process 'DAOI Chat' -ErrorAction SilentlyContinue | Stop-Process -Force
+          node fluxer_desktop/scripts/release-check.mjs --app $installed --channel stable --expect-renderer '${{ needs.renderer.outputs.version }}' --expect-source bundled --package-origin http://127.0.0.1:9 --app-arg=--disable-gpu --timeout-seconds 240
+          if ($LASTEXITCODE -ne 0) { throw 'Installed renderer launch check failed' }
