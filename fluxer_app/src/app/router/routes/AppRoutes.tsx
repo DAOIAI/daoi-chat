@@ -61,6 +61,10 @@ const YouPage = createNamedLoadableComponent<AppRouteComponentProps>({
 	displayName: 'YouPage',
 	load: async () => (await import('@app/features/app/components/pages/YouPage')).YouPage,
 });
+const ProjectCommunityPage = createNamedLoadableComponent<AppRouteComponentProps>({
+	displayName: 'ProjectCommunityPage',
+	load: async () => (await import('@app/features/daoi/pages/ProjectCommunityPage')).ProjectCommunityPage,
+});
 const MatureContentCheckCallbackPage = createDefaultLoadableComponent<AppRouteComponentProps>({
 	displayName: 'MatureContentCheckCallbackPage',
 	load: () => import('@app/features/auth/components/pages/MatureContentCheckCallbackPage'),
@@ -120,6 +124,13 @@ const guildsLayoutRoute = createRoute({
 	getParentRoute: () => appLayoutRoute,
 	id: 'guildsLayout',
 	layout: ({children}) => <GuildsLayout data-flx="app.router.app-routes.layout.guilds-layout">{children}</GuildsLayout>,
+});
+const projectCommunityRoute = createRoute({
+	getParentRoute: () => appLayoutRoute,
+	id: 'projectCommunity',
+	path: '/project-community',
+	preload: ProjectCommunityPage.preload,
+	component: () => <ProjectCommunityPage data-flx="app.router.app-routes.project-community-page" />,
 });
 const notificationsRoute = createRoute({
 	getParentRoute: () => appLayoutRoute,
@@ -391,6 +402,7 @@ const threadPanelRoute = createRoute({
 	component: () => <ThreadPanelRoutePage data-flx="app.router.app-routes.thread-panel-route-page" />,
 });
 export const appRouteTree = appLayoutRoute.addChildren([
+	projectCommunityRoute,
 	notificationsRoute,
 	youRoute,
 	userProfileRoute,

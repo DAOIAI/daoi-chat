@@ -1,0 +1,65 @@
+name: DAOI Web
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: Optional upstream CalVer; defaults to this run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NODE_ENV: production
+      RELEASE_CHANNEL: stable
+      PUBLIC_RELEASE_CHANNEL: stable
+      PUBLIC_ASSET_BASE_URL: ''
+      PUBLIC_STATIC_CDN_ENDPOINT: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: '1.98.1'
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 26
+      - name: Set upstream build metadata
+        id: meta
+        env:
+          FLUXER_BUILD_VERSION: ${{ inputs.build_version }}
+        run: cargo run --locked --quiet --manifest-path tools/ci/Cargo.toml -- build-desktop --step set_metadata --channel stable
+      - name: Export web build metadata
+        run: |
+          echo "BUILD_VERSION=${{ steps.meta.outputs.version }}" >> "$GITHUB_ENV"
+          echo "PUBLIC_BUILD_VERSION=${{ steps.meta.outputs.version }}" >> "$GITHUB_ENV"
+          echo "BUILD_SHA=${{ github.sha }}" >> "$GITHUB_ENV"
+          echo "PUBLIC_BUILD_SHA=${{ github.sha }}" >> "$GITHUB_ENV"
+      - name: Set up upstream pnpm
+        run: cargo run --locked --quiet --manifest-path tools/ci/Cargo.toml -- build-desktop --step setup_pnpm
+      - name: Install web workspace dependencies
+        run: pnpm install --frozen-lockfile --prod=false --filter fluxer_app...
+      - name: Build complete web application and Service Worker
+        run: pnpm --filter fluxer_app build
+      - name: Package the complete web release
+        run: |
+          for file in index.html auth-index.html manifest.json sw.js version.json; do
+            test -f "fluxer_app/dist/$file" || exit 1
+          done
+          tar -czf "daoi-web-$BUILD_VERSION.tar.gz" -C fluxer_app/dist .
+          sha256sum "daoi-web-$BUILD_VERSION.tar.gz" > "daoi-web-$BUILD_VERSION.tar.gz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: daoi-web-${{ steps.meta.outputs.version }}
+          path: |
+            daoi-web-*.tar.gz
+            daoi-web-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
